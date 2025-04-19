@@ -1,57 +1,36 @@
-<#
-.SYNOPSIS
-    Installs Adobe Acrobat Reader DC silently for Azure Image Builder.
-.DESCRIPTION
-    - Downloads latest Acrobat Reader DC enterprise installer (EN-US, 64-bit).
-    - Installs silently.
-    - Logs outcome, handles failures.
-.NOTES
-    Customize $DownloadUrl for other locales/versions.
-#>
+# Check if Adobe Acrobat Reader DC is already installed
+$adobeInstalled = Get-ItemProperty HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+    Where-Object { $_.DisplayName -like "Adobe Acrobat Reader DC*" }
 
-param (
-    [string]$DownloadUrl = "https://ardownload2.adobe.com/pub/adobe/reader/win/AcrobatDC/2400120583/AcroRdrDC2400120583_en_US.exe",
-    [string]$LogPath = "C:\Windows\Temp\InstallAdobeAcrobat.log"
-)
+if (-not $adobeInstalled) {
+    $installDir = "C:\Temp\AdobeInstall"
+    $installer = "$installDir\AcroRdrDC.exe"
+    $adobeUrl = "ftp://ftp.adobe.com/pub/adobe/reader/win/AcrobatDC/2300120143/AcroRdrDC2300120143_en_US.exe" # Update version as needed
 
-function Write-Log {
-    param(
-        [Parameter(Mandatory=$true)][string]$message
-    )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logMsg = "$timestamp $message"
-    Write-Host $logMsg
-    Add-Content -Path $LogPath -Value $logMsg
-}
+    try {
+        # Create temp directory
+        if (-not (Test-Path $installDir)) {
+            New-Item -Path $installDir -ItemType Directory -Force | Out-Null
+        }
 
-try {
-    Write-Log "Starting Adobe Acrobat Reader DC install."
+        # Download the installer
+        Write-Host "Downloading Adobe Reader installer..."
+        Invoke-WebRequest -Uri $adobeUrl -OutFile $installer
 
-    $installerPath = "$env:TEMP\AcroRdrDC_installer.exe"
+        # Install silently
+        Write-Host "Installing Adobe Reader silently..."
+        Start-Process -FilePath $installer -ArgumentList "/sAll /rs /rps /msi /norestart /quiet EULA_ACCEPT=YES" -Wait
 
-    # Download installer
-    Write-Log "Downloading Adobe Acrobat Reader from $DownloadUrl"
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $installerPath -ErrorAction Stop
+        # Cleanup
+        Remove-Item -Path $installer -Force
+        Remove-Item -Path $installDir -Force
 
-    # Install silently
-    Write-Log "Running silent installation."
-    $arguments = "/sAll /rs /rps /msi EULA_ACCEPT=YES /quiet /norestart"
-    $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru
-
-    # Check exit code
-    if ($process.ExitCode -eq 0) {
-        Write-Log "Adobe Acrobat Reader installed successfully."
-    } else {
-        Write-Log "Installer returned exit code $($process.ExitCode)."
-        throw "Adobe Acrobat Reader installation failed with code $($process.ExitCode)."
+        Write-Host "Adobe Reader installation completed successfully."
+    } catch {
+        Write-Error "Adobe Reader installation failed: $_"
+        exit 1
     }
-
-    # Cleanup installer
-    if (Test-Path $installerPath) {
-        Remove-Item $installerPath -Force
-        Write-Log "Cleaned up installer."
-    }
-} catch {
-    Write-Log "Error: $_"
-    throw
+} else {
+    Write-Host "Adobe Acrobat Reader DC is already installed. Skipping installation."
+    exit 0
 }

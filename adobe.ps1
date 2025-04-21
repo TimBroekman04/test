@@ -1,14 +1,16 @@
 <#
 .SYNOPSIS
-    Installs Adobe Acrobat Reader DC (64-bit) using winget if not already present, using only winget list Adobe* for detection.
+    Installs a package via WinGet in SYSTEM context (Packer/AIB), with full bootstrapping.
 .DESCRIPTION
-    - Uses 'winget list Adobe*' to check for installed Adobe Acrobat Reader (32/64-bit).
-    - Installs Adobe Acrobat Reader DC (64-bit) if not found.
-    - Logs all actions and errors.
+    - Ensures all WinGet prerequisites are present.
+    - Repairs/bootstraps WinGet using PowerShell module if needed.
+    - Installs the specified package.
+    - Designed for non-interactive image builds (Packer, AIB).
 #>
 
 $ErrorActionPreference = 'Stop'
-$LogPath = "$env:SystemDrive\buildArtifacts\AdobeReaderInstall.log"
+$LogPath = "$env:SystemDrive\buildArtifacts\WinGetInstall.log"
+$PackageId = 'Adobe.Acrobat.Reader.64-bit' 
 
 function Write-Log {
     param([string]$Message)
@@ -23,52 +25,64 @@ if (-not (Test-Path -Path (Split-Path $LogPath))) {
     New-Item -Path (Split-Path $LogPath) -ItemType Directory -Force | Out-Null
 }
 
-Write-Log "Starting Adobe Reader install script (winget version, detection via winget list Adobe*)."
+Write-Log "Starting WinGet install script for SYSTEM context."
 
-# Find winget.exe
-function Get-WingetPath {
-    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-    if ($winget) { return $winget.Source }
-    $wingetPaths = Get-ChildItem "C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime | Select-Object -Last 1
-    if ($wingetPaths) { return $wingetPaths.FullName }
-    $userWinget = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
-    if (Test-Path $userWinget) { return $userWinget }
-    return $null
+# Step 1: Ensure prerequisites (VC++ runtimes, UWP dependencies, DesktopAppInstaller)
+# See: https://github.com/microsoft/winget-cli#dependencies
+function Ensure-WinGetPrereqs {
+    Write-Log "Ensuring WinGet prerequisites are installed..."
+
+    # Install VC++ Redistributables (required for WinGet)
+    $vcRedistUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    $vcRedistPath = "$env:TEMP\vc_redist.x64.exe"
+    Invoke-WebRequest -Uri $vcRedistUrl -OutFile $vcRedistPath -UseBasicParsing
+    Start-Process -FilePath $vcRedistPath -ArgumentList "/install /quiet /norestart" -Wait
+
+    # Install Desktop App Installer (winget host)
+    $wingetMsixUrl = "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
+    $wingetMsixPath = "$env:TEMP\DesktopAppInstaller.msixbundle"
+    Invoke-WebRequest -Uri $wingetMsixUrl -OutFile $wingetMsixPath -UseBasicParsing
+    Add-AppxProvisionedPackage -Online -PackagePath $wingetMsixPath -SkipLicense
+
+    Write-Log "Prerequisites installed."
 }
 
-$wingetPath = Get-WingetPath
-if (-not $wingetPath) {
-    Write-Log "ERROR: winget is not installed or not available."
-    exit 1
-}
-Write-Log "winget found at: $wingetPath"
-
-# Use winget list Adobe* to check for installed Reader
-Write-Log "Checking for installed Adobe Acrobat Reader via 'winget list Adobe*'..."
-$adobeList = & "$wingetPath" list Adobe* 2>&1
-
-# Look for 32-bit or 64-bit Reader in the output
-if ($adobeList -match "Adobe Acrobat Reader DC" -or
-    $adobeList -match "Adobe.Acrobat.Reader.64-bit" -or
-    $adobeList -match "Adobe.Acrobat.Reader.32-bit") {
-    Write-Log "Adobe Acrobat Reader is already installed (winget list check). Skipping installation."
-    exit 0
+# Step 2: Repair/Bootstrap WinGet using PowerShell module
+function Repair-WinGet {
+    Write-Log "Repairing/bootstrapping WinGet with PowerShell module..."
+    Install-Module -Name Microsoft.WinGet.Client -Force -AllowClobber -Scope AllUsers
+    Import-Module Microsoft.WinGet.Client
+    Repair-WinGetPackageManager -Force
+    Write-Log "WinGet repair/bootstrap complete."
 }
 
-Write-Log "Adobe Acrobat Reader not found. Installing with winget..."
-try {
-    $installResult = & "$wingetPath" install --id 'Adobe.Acrobat.Reader.64-bit' --silent --accept-package-agreements --accept-source-agreements --scope machine 2>&1
-    Write-Log $installResult
-    if ($LASTEXITCODE -eq 0) {
-        Write-Log "Adobe Reader installed successfully via winget."
-    } else {
-        Write-Log "ERROR: winget install exited with code $LASTEXITCODE"
-        exit $LASTEXITCODE
+# Step 3: Install the package
+function Install-WithWinGet {
+    Write-Log "Attempting to install package: $PackageId"
+    try {
+        $result = winget install --id $PackageId --silent --accept-package-agreements --accept-source-agreements --scope machine --disable-interactivity 2>&1
+        Write-Log $result
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "WinGet package installed successfully."
+        } else {
+            Write-Log "ERROR: WinGet install exited with code $LASTEXITCODE"
+            exit $LASTEXITCODE
+        }
+    } catch {
+        Write-Log "ERROR: WinGet install failed. $_"
+        exit 1
     }
+}
+
+# Main logic
+try {
+    Ensure-WinGetPrereqs
+    Repair-WinGet
+    Install-WithWinGet
 } catch {
-    Write-Log "ERROR: winget install failed. $_"
+    Write-Log "Fatal script error: $_"
     exit 1
 }
 
-Write-Log "Adobe Reader installation script completed."
+Write-Log "WinGet install script completed."
 exit 0

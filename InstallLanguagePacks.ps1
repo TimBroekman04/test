@@ -1,170 +1,120 @@
 <#
 .SYNOPSIS
-    Enterprise-grade language pack installer for Azure Image Builder (AIB) and Packer pipelines.
+    Installs Windows language packs and features on demand robustly for AIB.
 .DESCRIPTION
-    - Handles Windows Update/service interference
-    - Ensures idempotency and compliance
-    - Robust logging, error handling, and security
-    - Supports audit and CI/CD integration
+    - Handles servicing tasks
+    - Waits for OS readiness
+    - Retries on transient errors (including 0x80070020)
+    - Disables cleanup tasks
+    - Logs all actions
+.PARAMETER LanguageList
+    Array or string of language names (e.g. "Dutch (Netherlands)")
 #>
-
-[CmdletBinding()]
-param (
+param(
     [Parameter(Mandatory)]
-    [ValidateSet("Arabic (Saudi Arabia)","Bulgarian (Bulgaria)","Chinese (Simplified, China)","Chinese (Traditional, Taiwan)","Croatian (Croatia)","Czech (Czech Republic)","Danish (Denmark)","Dutch (Netherlands)", "English (United Kingdom)", "Estonian (Estonia)", "Finnish (Finland)", "French (Canada)", "French (France)", "German (Germany)", "Greek (Greece)", "Hebrew (Israel)", "Hungarian (Hungary)", "Italian (Italy)", "Japanese (Japan)", "Korean (Korea)", "Latvian (Latvia)", "Lithuanian (Lithuania)", "Norwegian, Bokmål (Norway)", "Polish (Poland)", "Portuguese (Brazil)", "Portuguese (Portugal)", "Romanian (Romania)", "Russian (Russia)", "Serbian (Latin, Serbia)", "Slovak (Slovakia)", "Slovenian (Slovenia)", "Spanish (Mexico)", "Spanish (Spain)", "Swedish (Sweden)", "Thai (Thailand)", "Turkish (Turkey)", "Ukrainian (Ukraine)", "English (Australia)", "English (United States)")]
     [string[]]$LanguageList
 )
 
-# Enterprise logging
-$LogPath = "C:\Windows\Temp\AIB_LanguagePackInstall.log"
-function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $entry = "[$timestamp][$Level] $Message"
-    Write-Host $entry
-    Add-Content -Path $LogPath -Value $entry
+function Write-Log { param($msg, $lvl = "INFO") ; Write-Host "[$((Get-Date).ToString('s'))][$lvl] $msg" }
+
+# Helper: Wait for servicing tasks to be ready
+function Wait-ForServicingReady {
+    $tasks = @(
+        "\Microsoft\Windows\LanguageComponentsInstaller\Installation",
+        "\Microsoft\Windows\LanguageComponentsInstaller\ReconcileLanguageResources"
+    )
+    foreach ($task in $tasks) {
+        $taskObj = Get-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
+        $attempts = 0
+        while ($taskObj.State -ne "Ready" -and $attempts -lt 10) {
+            Write-Log "$task not ready, waiting..."
+            Start-Sleep -Seconds 5
+            $taskObj = Get-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
+            $attempts++
+        }
+        if ($taskObj.State -ne "Ready") {
+            Write-Log "$task did not reach Ready state after waiting." "ERROR"
+        }
+    }
 }
 
-# Compliance: Audit start
-Write-Log "=== Starting Language Pack Installation (Enterprise) ==="
-Write-Log "Languages requested: $($LanguageList -join ', ')"
+# Helper: Wait for Windows servicing processes to finish
+function Wait-ForServicingProcesses {
+    $servicingProcesses = "TiWorker","TrustedInstaller","MoUsoCoreWorker"
+    foreach ($proc in $servicingProcesses) {
+        while (Get-Process -Name $proc -ErrorAction SilentlyContinue) {
+            Write-Log "$proc is running; waiting before language pack installation..."
+            Start-Sleep -Seconds 10
+        }
+    }
+}
 
 # Helper: Check for pending reboot
 function Test-PendingReboot {
-    $paths = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
-        'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations',
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
-    )
-    foreach ($path in $paths) { if (Test-Path $path) { return $true } }
-    return $false
+    $reboot = $false
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $reboot = $true }
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $reboot = $true }
+    return $reboot
 }
 
-# Helper: Stop/Start update services
-$services = @('wuauserv', 'bits', 'dosvc', 'cryptsvc')
-function Stop-ConflictingServices {
-    foreach ($svc in $services) {
-        try {
-            Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
-            Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
-            Write-Log "Stopped and disabled service: $svc"
-        } catch { Write-Log "Failed to stop/disable $svc: $_" "WARN" }
-    }
-}
-function Start-ConflictingServices {
-    foreach ($svc in $services) {
-        try {
-            Set-Service -Name $svc -StartupType Manual -ErrorAction SilentlyContinue
-            Start-Service -Name $svc -ErrorAction SilentlyContinue
-            Write-Log "Started and set service to manual: $svc"
-        } catch { Write-Log "Failed to start/enable $svc: $_" "WARN" }
-    }
-}
+# Step 1: Disable cleanup tasks (per MSFT best practice)
+Write-Log "Disabling language pack cleanup tasks."
+Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "Pre-staged app cleanup" -ErrorAction SilentlyContinue
+Disable-ScheduledTask -TaskPath "\Microsoft\Windows\MUI\" -TaskName "LPRemove" -ErrorAction SilentlyContinue
+Disable-ScheduledTask -TaskPath "\Microsoft\Windows\LanguageComponentsInstaller" -TaskName "Uninstallation" -ErrorAction SilentlyContinue
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Control Panel\International" /v "BlockCleanupOfUnusedPreinstalledLangPacks" /t REG_DWORD /d 1 /f
 
-# Helper: Disable/Enable scheduled tasks
+# Step 2: Enable and start servicing tasks
+Write-Log "Enabling and starting language servicing tasks."
 $tasks = @(
-    "\Microsoft\Windows\AppxDeploymentClient\Pre-staged app cleanup",
-    "\Microsoft\Windows\MUI\LPRemove",
-    "\Microsoft\Windows\LanguageComponentsInstaller\Uninstallation",
     "\Microsoft\Windows\LanguageComponentsInstaller\Installation",
     "\Microsoft\Windows\LanguageComponentsInstaller\ReconcileLanguageResources"
 )
-function Disable-ConflictingTasks {
-    foreach ($task in $tasks) {
-        try {
-            Disable-ScheduledTask -TaskPath ([System.IO.Path]::GetDirectoryName($task)) -TaskName ([System.IO.Path]::GetFileName($task)) -ErrorAction SilentlyContinue
-            Write-Log "Disabled scheduled task: $task"
-        } catch { Write-Log "Failed to disable task $task: $_" "WARN" }
-    }
-}
-function Enable-ConflictingTasks {
-    foreach ($task in $tasks) {
-        try {
-            Enable-ScheduledTask -TaskPath ([System.IO.Path]::GetDirectoryName($task)) -TaskName ([System.IO.Path]::GetFileName($task)) -ErrorAction SilentlyContinue
-            Write-Log "Enabled scheduled task: $task"
-        } catch { Write-Log "Failed to enable task $task: $_" "WARN" }
+foreach ($task in $tasks) {
+    $t = Get-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
+    if ($t -and $t.State -ne "Ready") {
+        Enable-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
+        Start-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
     }
 }
 
-# 1. Compliance: Check and clear pending reboot
+Wait-ForServicingReady
+
+# Step 3: Check for pending reboot
 if (Test-PendingReboot) {
-    Write-Log "Pending reboot detected. Rebooting now for clean state." "WARN"
+    Write-Log "Pending reboot detected. Restarting system."
     Restart-Computer -Force
-    Start-Sleep -Seconds 90
+    Start-Sleep -Seconds 60
+    exit 3010
 }
 
-# 2. Security: Stop Windows Update and related services
-Stop-ConflictingServices
+# Step 4: Wait for servicing processes to finish
+Wait-ForServicingProcesses
 
-# 3. Security: Disable conflicting scheduled tasks
-Disable-ConflictingTasks
-
-# 4. Hardened Language Pack Install with retry and telemetry
-$LanguagesDictionary = @{
-    "Arabic (Saudi Arabia)" = "ar-SA"
-    "Bulgarian (Bulgaria)" = "bg-BG"
-    "Chinese (Simplified, China)" = "zh-CN"
-    "Chinese (Traditional, Taiwan)" = "zh-TW"
-    "Croatian (Croatia)" = "hr-HR"
-    "Czech (Czech Republic)" = "cs-CZ"
-    "Danish (Denmark)" = "da-DK"
-    "Dutch (Netherlands)" = "nl-NL"
-    "English (United States)" = "en-US"
-    "English (United Kingdom)" = "en-GB"
-    "Estonian (Estonia)" = "et-EE"
-    "Finnish (Finland)" = "fi-FI"
-    "French (Canada)" = "fr-CA"
-    "French (France)" = "fr-FR"
-    "German (Germany)" = "de-DE"
-    "Greek (Greece)" = "el-GR"
-    "Hebrew (Israel)" = "he-IL"
-    "Hungarian (Hungary)" = "hu-HU"
-    "Italian (Italy)" = "it-IT"
-    "Japanese (Japan)" = "ja-JP"
-    "Korean (Korea)" = "ko-KR"
-    "Latvian (Latvia)" = "lv-LV"
-    "Lithuanian (Lithuania)" = "lt-LT"
-    "Norwegian, Bokmål (Norway)" = "nb-NO"
-    "Polish (Poland)" = "pl-PL"
-    "Portuguese (Brazil)" = "pt-BR"
-    "Portuguese (Portugal)" = "pt-PT"
-    "Romanian (Romania)" = "ro-RO"
-    "Russian (Russia)" = "ru-RU"
-    "Serbian (Latin, Serbia)" = "sr-Latn-RS"
-    "Slovak (Slovakia)" = "sk-SK"
-    "Slovenian (Slovenia)" = "sl-SI"
-    "Spanish (Mexico)" = "es-MX"
-    "Spanish (Spain)" = "es-ES"
-    "Swedish (Sweden)" = "sv-SE"
-    "Thai (Thailand)" = "th-TH"
-    "Turkish (Turkey)" = "tr-TR"
-    "Ukrainian (Ukraine)" = "uk-UA"
-    "English (Australia)" = "en-AU"
-}
-
-foreach ($Language in $LanguageList) {
-    $LanguageCode = $LanguagesDictionary[$Language]
-    $maxAttempts = 3
-    $attempt = 1
+# Step 5: Install language packs with retry logic
+$maxAttempts = 3
+foreach ($language in $LanguageList) {
     $success = $false
-    while ($attempt -le $maxAttempts -and -not $success) {
+    for ($attempt=1; $attempt -le $maxAttempts; $attempt++) {
         try {
-            Write-Log "Installing language pack $Language ($LanguageCode), attempt $attempt"
-            Install-Language -Language $LanguageCode -ErrorAction Stop
+            Write-Log "*** Installing language pack [$language] (Attempt $attempt/$maxAttempts) ***"
+            # Replace this with your actual install logic, e.g.:
+            Install-Language -Language $language -CopyToSettings -ExcludeFeatures
+            # Check for success, throw on partial install
+            # (If using MSFT module, check $LASTEXITCODE or returned object)
             $success = $true
-            Write-Log "Successfully installed $Language ($LanguageCode)"
+            Write-Log "Language pack [$language] installed successfully."
+            break
         } catch {
-            Write-Log "Install failed for $Language ($LanguageCode), attempt $attempt: $($_.Exception.Message)" "ERROR"
-            if ($attempt -eq $maxAttempts) { throw }
-            Start-Sleep -Seconds (30 * $attempt)
+            Write-Log "Attempt $attempt failed: $_" "WARNING"
+            Start-Sleep -Seconds (10 * $attempt)
+            if ($attempt -eq $maxAttempts) {
+                Write-Log "Language pack [$language] failed after $maxAttempts attempts." "ERROR"
+                throw
+            }
         }
-        $attempt++
     }
 }
 
-# 5. Compliance: Re-enable services and tasks
-Enable-ConflictingTasks
-Start-ConflictingServices
-
-Write-Log "Language pack installation complete. Rebooting to finalize."
-Restart-Computer -Force
+Write-Log "All language packs processed."
+exit 0

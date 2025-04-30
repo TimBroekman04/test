@@ -21,7 +21,7 @@ if (Test-Path "$Env:SystemRoot\Panther\unattend.xml") {
 }
 
 Write-Output '>>> Sysprepping VM ...'
-& "$Env:SystemRoot\System32\Sysprep\Sysprep.exe" /oobe /generalize /quiet /quit
+& "$Env:SystemRoot\System32\Sysprep\Sysprep.exe" /oobe /generalize /quiet /shutdown
 
 # Wait for Sysprep to finish
 while ($true) {

@@ -1,81 +1,65 @@
 param(
     [Parameter(Mandatory)]
-    [string]$ZipUrl,  # SAS-protected URL to NL-LanguagePack.zip in Azure Storage
-    [Parameter(Mandatory=$false)]
-    [string]$TempPath = "$env:TEMP\NL-LanguagePack"
+    [string]$LanguageTag, # e.g. 'nl-NL'
+    [Parameter(Mandatory)]
+    [string]$SourcePath,  # e.g. '\\fileserver\langpacks\nl-NL'
+    [Parameter()]
+    [string]$LogDir = "$env:SystemDrive\Logs\LangInstall"
 )
 
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
-    Write-Host "[$Level] $Message"
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $msg = "[$timestamp][$Level] $Message"
+    Write-Host $msg
+    Add-Content -Path (Join-Path $LogDir "LangInstall.log") -Value $msg
 }
 
+# Ensure log directory exists
+if (-not (Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory | Out-Null }
+
 try {
-    # Ensure temp path is clean
-    if (Test-Path $TempPath) { Remove-Item -Path $TempPath -Recurse -Force }
-    New-Item -Path $TempPath -ItemType Directory -Force | Out-Null
+    Write-Log "Starting language pack installation for $LanguageTag from $SourcePath"
 
-    $zipFile = Join-Path $TempPath "NL-LanguagePack.zip"
+    # Find main language pack CAB (Client-Language-Pack)
+    $langCab = Get-ChildItem -Path $SourcePath -Filter "*$LanguageTag*.cab" | Where-Object { $_.Name -like "*Client-Language-Pack*" } | Select-Object -First 1
+    if (-not $langCab) { throw "Main language pack CAB not found for $LanguageTag in $SourcePath" }
+    $logCab = Join-Path $LogDir "DISM_LangPack_$($LanguageTag).log"
+    Write-Log "Installing main CAB: $($langCab.Name)"
+    $dismArgs = "/Online /Add-Package /PackagePath:`"$($langCab.FullName)`" /NoRestart /Quiet /LogPath:`"$logCab`""
+    $dismRes = Start-Process -FilePath dism.exe -ArgumentList $dismArgs -Wait -PassThru
+    if ($dismRes.ExitCode -ne 0) { throw "DISM failed for main CAB. See $logCab" }
 
-    Write-Log "Downloading Dutch language pack ZIP from Azure Storage..."
-    Invoke-WebRequest -Uri $ZipUrl -OutFile $zipFile -UseBasicParsing
-
-    Write-Log "Extracting ZIP to $TempPath..."
-    Expand-Archive -Path $zipFile -DestinationPath $TempPath -Force
-
-    # Path to extracted CABs and APPX
-    $cabPath = $TempPath
-
-    # Disable language pack cleanup tasks to prevent removal during OOBE
-    Write-Log "Disabling language pack cleanup scheduled tasks..."
-    Disable-ScheduledTask -TaskPath "\Microsoft\Windows\AppxDeploymentClient\" -TaskName "Pre-staged app cleanup" -ErrorAction SilentlyContinue
-    Disable-ScheduledTask -TaskPath "\Microsoft\Windows\MUI\" -TaskName "LPRemove" -ErrorAction SilentlyContinue
-    Disable-ScheduledTask -TaskPath "\Microsoft\Windows\LanguageComponentsInstaller" -TaskName "Uninstallation" -ErrorAction SilentlyContinue
-    New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Control Panel\International" -Force | Out-Null
-    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Control Panel\International" -Name "BlockCleanupOfUnusedPreinstalledLangPacks" -Value 1 -Type DWord
-
-    # Install the main language pack CAB
-    $langCab = Get-ChildItem -Path $cabPath -Filter "*nl-nl*.cab" | Where-Object { $_.Name -like "*Client-Language-Pack*" } | Select-Object -First 1
-    if ($langCab) {
-        Write-Log "Installing main Dutch language pack CAB: $($langCab.Name)"
-        Add-WindowsPackage -Online -PackagePath $langCab.FullName -NoRestart
-    } else {
-        throw "Dutch language pack CAB not found in $cabPath"
-    }
-
-    # Install additional FODs (Basic, OCR, Handwriting, etc.)
-    $fodCabs = Get-ChildItem -Path $cabPath -Filter "*nl-nl*.cab" | Where-Object { $_.Name -notlike "*Client-Language-Pack*" }
+    # Install all FODs (Features on Demand) for this language
+    $fodCabs = Get-ChildItem -Path $SourcePath -Filter "*$LanguageTag*.cab" | Where-Object { $_.Name -notlike "*Client-Language-Pack*" }
     foreach ($fod in $fodCabs) {
+        $fodLog = Join-Path $LogDir "DISM_FOD_$($fod.BaseName).log"
         Write-Log "Installing FOD CAB: $($fod.Name)"
-        Add-WindowsPackage -Online -PackagePath $fod.FullName -NoRestart
+        $fodArgs = "/Online /Add-Package /PackagePath:`"$($fod.FullName)`" /NoRestart /Quiet /LogPath:`"$fodLog`""
+        $fodRes = Start-Process -FilePath dism.exe -ArgumentList $fodArgs -Wait -PassThru
+        if ($fodRes.ExitCode -ne 0) { throw "DISM failed for FOD CAB $($fod.Name). See $fodLog" }
     }
 
     # Install Local Experience Pack APPX if present
-    $lepAppx = Get-ChildItem -Path $cabPath -Filter "*LanguageExperiencePack.nl-nl*.appx" | Select-Object -First 1
+    $lepAppx = Get-ChildItem -Path $SourcePath -Filter "*LanguageExperiencePack.$LanguageTag*.appx" | Select-Object -First 1
     if ($lepAppx) {
         Write-Log "Installing Local Experience Pack APPX: $($lepAppx.Name)"
-        Add-AppProvisionedPackage -Online -PackagePath $lepAppx.FullName
+        Add-AppxProvisionedPackage -Online -PackagePath $lepAppx.FullName -SkipLicense -ErrorAction Stop
     }
 
-    # Register the language in Windows
-    Write-Log "Registering Dutch language in user language list..."
-    $LanguageList = Get-WinUserLanguageList
-    if (-not ($LanguageList.LanguageTag -contains "nl-NL")) {
-        $LanguageList.Add("nl-NL")
-        Set-WinUserLanguageList $LanguageList -Force
+    # Register language for user/system
+    Write-Log "Registering $LanguageTag as system and user UI language"
+    $langList = Get-WinUserLanguageList
+    if (-not ($langList.LanguageTag -contains $LanguageTag)) {
+        $langList.Add($LanguageTag)
+        Set-WinUserLanguageList $langList -Force
     }
-
-    # Set system preferred UI language
-    Set-SystemPreferredUILanguage -Language "nl-NL"
+    Set-SystemPreferredUILanguage -Language $LanguageTag
     Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true
 
-    Write-Log "Dutch language pack installation completed successfully." "SUCCESS"
+    Write-Log "Language pack $LanguageTag installed successfully." "SUCCESS"
 }
 catch {
-    Write-Log "Error during Dutch language pack installation: $_" "ERROR"
+    Write-Log "Error: $_" "ERROR"
     exit 1
-}
-finally {
-    # Clean up temp files
-    if (Test-Path $TempPath) { Remove-Item -Path $TempPath -Recurse -Force }
 }

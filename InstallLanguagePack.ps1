@@ -54,7 +54,7 @@ try {
     Write-Log "Registering $LanguageTag as system, user, and welcome UI language"
     # Install-Language is preferred, but fallback to manual registration if not present
     if (Get-Command Install-Language -ErrorAction SilentlyContinue) {
-        Install-Language -Language $LanguageTag -CopyToSettings -Force
+        Install-Language -Language $LanguageTag -CopyToSettings
     }
 
     Set-WinUserLanguageList $LanguageTag -Force

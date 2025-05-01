@@ -63,8 +63,7 @@ try {
     $capabilities = @(
         "Language.Basic~~~$LanguageTag~0.0.1.0",
         "Language.Handwriting~~~$LanguageTag~0.0.1.0",
-        "Language.OCR~~~$LanguageTag~0.0.1.0",
-        "Language.TextToSpeech~~~$LanguageTag~0.0.1.0"
+        "Language.OCR~~~$LanguageTag~0.0.1.0"
     )
     foreach ($capability in $capabilities) {
         Write-Log "Installing capability: $capability"

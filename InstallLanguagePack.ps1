@@ -199,7 +199,6 @@ powershell.exe -Command "Set-WinUILanguageOverride -Language $LanguageTag; Set-W
 "@
     
     Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" -Name "SetLanguageOnBoot" -Value $applyLangScript -Type String -Force
-
     Write-Log "Language pack $LanguageTag installed and set as default. Windows requires a reboot for display language to take effect." "SUCCESS"
 
     # Sysprep readiness - clean component store

@@ -1,34 +1,115 @@
-Write-Output '>>> Waiting for GA Service (RdAgent) to start ...'
-while ((Get-Service RdAgent).Status -ne 'Running') { Start-Sleep -Seconds 5 }
+<#
+.SYNOPSIS
+Enterprise Sysprep Script for Azure Virtual Desktop Image Templates
+.DESCRIPTION
+Version 2.1 (2025-05-01)
+Includes Azure-optimized service checks, registry validation, and secure cleanup
+#>
 
-Write-Output '>>> Waiting for GA Service (WindowsAzureGuestAgent) to start ...'
-while ((Get-Service WindowsAzureGuestAgent).Status -ne 'Running') { Start-Sleep -Seconds 5 }
+Start-Transcript -Path "C:\Windows\Temp\AVD-Sysprep.log" -Append
 
-# Only check for WindowsAzureTelemetryService if it exists
-if (Get-Service -Name 'WindowsAzureTelemetryService' -ErrorAction SilentlyContinue) {
-    Write-Output '>>> Waiting for GA Service (WindowsAzureTelemetryService) to start ...'
-    while ((Get-Service WindowsAzureTelemetryService).Status -ne 'Running') { Start-Sleep -Seconds 5 }
+try {
+    #region Service Initialization Sequence
+    Write-Output "[$(Get-Date)] Starting Azure GA Agent validation..."
+    
+    $maxRetries = 30  # 2.5 minute timeout
+    $retryInterval = 5
+
+    # RdAgent check with timeout
+    Write-Output ">>> Waiting for RdAgent service..."
+    $retryCount = 0
+    while ((Get-Service -Name RdAgent -ErrorAction SilentlyContinue).Status -ne 'Running') {
+        if ($retryCount -ge $maxRetries) {
+            throw "RdAgent failed to start within $($maxRetries * $retryInterval) seconds"
+        }
+        Start-Sleep -Seconds $retryInterval
+        $retryCount++
+    }
+
+    # WindowsAzureTelemetryService (conditional check)
+    if (Get-Service -Name WindowsAzureTelemetryService -ErrorAction SilentlyContinue) {
+        Write-Output ">>> Waiting for WindowsAzureTelemetryService..."
+        $retryCount = 0
+        while ((Get-Service WindowsAzureTelemetryService).Status -ne 'Running') {
+            if ($retryCount -ge $maxRetries) {
+                throw "WindowsAzureTelemetryService failed to start within timeout"
+            }
+            Start-Sleep -Seconds $retryInterval
+            $retryCount++
+        }
+    }
+
+    # WindowsAzureGuestAgent check
+    Write-Output ">>> Waiting for WindowsAzureGuestAgent..."
+    $retryCount = 0
+    while ((Get-Service -Name WindowsAzureGuestAgent).Status -ne 'Running') {
+        if ($retryCount -ge $maxRetries) {
+            throw "WindowsAzureGuestAgent failed to start within timeout"
+        }
+        Start-Sleep -Seconds $retryInterval
+        $retryCount++
+    }
+    #endregion
+
+    #region System Cleanup
+    Write-Output "[$(Get-Date)] Cleaning residual configuration files..."
+    
+    $unattendPaths = @(
+        "$Env:SystemRoot\system32\Sysprep\unattend.xml",
+        "$Env:SystemRoot\Panther\unattend.xml"
+    )
+
+    foreach ($path in $unattendPaths) {
+        if (Test-Path $path) {
+            try {
+                Remove-Item $path -Force -ErrorAction Stop
+                Write-Output "Removed: $path"
+            }
+            catch {
+                Write-Warning "Failed to remove $path - $_"
+            }
+        }
+    }
+    #endregion
+
+    #region Sysprep Execution
+    Write-Output "[$(Get-Date)] Initiating Sysprep sequence..."
+    
+    $sysprepParams = @(
+        "/oobe",
+        "/generalize",
+        "/quiet",
+        "/quit"  # Critical change for Azure integration
+    )
+
+    $sysprepProcess = Start-Process "$Env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList $sysprepParams -PassThru
+    
+    # Validation loop with timeout
+    $sysprepTimeout = 600  # 10 minutes
+    $startTime = Get-Date
+    while ((Get-Date) - $startTime -lt [TimeSpan]::FromSeconds($sysprepTimeout)) {
+        $imageState = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -Name ImageState -ErrorAction SilentlyContinue).ImageState
+        
+        if ($imageState -eq 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') {
+            Write-Output "[$(Get-Date)] Sysprep validation successful"
+            break
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    if (-not $imageState -or $imageState -ne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') {
+        throw "Sysprep failed to reach expected state. Current state: $imageState"
+    }
+    #endregion
+}
+catch {
+    Write-Output "[$(Get-Date)] CRITICAL ERROR: $_"
+    $_ | Format-List -Force | Out-String | Write-Output
+    exit 1
+}
+finally {
+    Stop-Transcript
 }
 
-# Clean up unattend files
-if (Test-Path "$Env:SystemRoot\system32\Sysprep\unattend.xml") {
-    Write-Output '>>> Removing Sysprep\unattend.xml ...'
-    Remove-Item "$Env:SystemRoot\system32\Sysprep\unattend.xml" -Force
-}
-if (Test-Path "$Env:SystemRoot\Panther\unattend.xml") {
-    Write-Output '>>> Removing Panther\unattend.xml ...'
-    Remove-Item "$Env:SystemRoot\Panther\unattend.xml" -Force
-}
-
-Write-Output '>>> Sysprepping VM ...'
-& "$Env:SystemRoot\System32\Sysprep\Sysprep.exe" /oobe /generalize /quiet /shutdown
-
-# Wait for Sysprep to finish
-while ($true) {
-    $imageState = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
-    Write-Output $imageState
-    if ($imageState -eq 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') { break }
-    Start-Sleep -Seconds 5
-}
-
-Write-Output '>>> Sysprep complete ...'
+Write-Output "[$(Get-Date)] Sysprep process completed successfully"
+exit 0

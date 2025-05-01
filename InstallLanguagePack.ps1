@@ -8,91 +8,79 @@ param(
 )
 
 function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
+    param(
+        [string]$Message,
+        [ValidateSet('INFO','WARNING','ERROR','SUCCESS')]
+        [string]$Level = "INFO"
+    )
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $msg = "[$timestamp][$Level] $Message"
     Write-Host $msg
     Add-Content -Path "$TempPath\LangInstall.log" -Value $msg
 }
 
-# Prep temp folder
+# --- MAIN EXECUTION ---
+
 if (Test-Path $TempPath) { Remove-Item -Path $TempPath -Recurse -Force }
 New-Item -Path $TempPath -ItemType Directory -Force | Out-Null
 
 try {
-    # Download ZIP
+    # Download and extract
     $zipFile = Join-Path $TempPath "$LanguageTag-LanguagePack.zip"
     Write-Log "Downloading language pack ZIP from Azure Storage..."
     Invoke-WebRequest -Uri $LangZipUrl -OutFile $zipFile -UseBasicParsing
 
-    # Extract ZIP
     Write-Log "Extracting ZIP to $TempPath..."
     Expand-Archive -Path $zipFile -DestinationPath $TempPath -Force
-    $LipContent = $TempPath
 
-    # Disable Language Pack Cleanup
-    Write-Log "Blocking language pack cleanup scheduled tasks and registry policy"
-    $regPath = "HKLM:\SOFTWARE\Policies\Microsoft\Control Panel\International"
-    if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-    Set-ItemProperty -Path $regPath -Name "BlockCleanupOfUnusedPreinstalledLangPacks" -Value 1 -Type DWord
+    # Find CABs
+    $langPackCab = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-Client-Language-Pack_x64_${LanguageTag}.cab" -Recurse | Select-Object -First 1
+    $basicCab    = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-LanguageFeatures-Basic-${LanguageTag}-Package~*.cab" -Recurse | Select-Object -First 1
+    $ocrCab      = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-LanguageFeatures-OCR-${LanguageTag}-Package~*.cab" -Recurse | Select-Object -First 1
 
-    $tasks = @(
-        "\Microsoft\Windows\AppxDeploymentClient\Pre-staged app cleanup",
-        "\Microsoft\Windows\MUI\LPRemove",
-        "\Microsoft\Windows\LanguageComponentsInstaller\Uninstallation"
-    )
-    foreach ($task in $tasks) {
-        try {
-            Disable-ScheduledTask -TaskPath ($task.Substring(0, $task.LastIndexOf('\')+1)) -TaskName ($task.Split('\')[-1]) -ErrorAction Stop
-            Write-Log "Disabled scheduled task: $task"
-        } catch {
-            Write-Log "Scheduled task $task not found or could not be disabled: $_" "WARNING"
-        }
+    if (-not $langPackCab) { Write-Log "Main language pack CAB not found!" "ERROR"; throw }
+    if (-not $basicCab)    { Write-Log "Basic FOD CAB not found!" "ERROR"; throw }
+    if (-not $ocrCab)      { Write-Log "OCR FOD CAB not found!" "ERROR"; throw }
+
+    # Install main language pack
+    Write-Log "Installing main language pack CAB: $($langPackCab.FullName)"
+    $dismLog1 = Join-Path $TempPath "DISM_LangPack.log"
+    $proc1 = Start-Process -FilePath "dism.exe" -ArgumentList "/Online /Add-Package /PackagePath:`"$($langPackCab.FullName)`" /NoRestart /Quiet /LogPath:`"$dismLog1`"" -Wait -PassThru
+    if ($proc1.ExitCode -ne 0) {
+        Write-Log "DISM failed for $($langPackCab.Name), exit code $($proc1.ExitCode). See $dismLog1" "ERROR"
+        throw
     }
 
-    # Install main language pack CAB using DISM
-    $langCab = Get-ChildItem -Path $LipContent -Filter "Microsoft-Windows-Client-Language-Pack_x64_$LanguageTag*.cab" -Recurse | Select-Object -First 1
-    if (-not $langCab) { throw "Main language pack CAB not found for $LanguageTag in $LipContent or subfolders" }
-    Write-Log "Installing main CAB: $($langCab.FullName)"
-    $dismLog = Join-Path $TempPath "DISM_LangPack_$LanguageTag.log"
-    $dismArgs = "/Online /Add-Package /PackagePath:`"$($langCab.FullName)`" /NoRestart /Quiet /LogPath:`"$dismLog`""
-    $dismRes = Start-Process -FilePath dism.exe -ArgumentList $dismArgs -Wait -PassThru
-    if ($dismRes.ExitCode -ne 0) { throw "DISM failed for main CAB. See $dismLog" }
-
-    # Install FODs using Add-WindowsCapability (recommended for 24H2)
-    $capabilities = @(
-        "Language.Basic~~~$LanguageTag~0.0.1.0",
-        "Language.Handwriting~~~$LanguageTag~0.0.1.0",
-        "Language.OCR~~~$LanguageTag~0.0.1.0"
-    )
-    foreach ($capability in $capabilities) {
-        Write-Log "Installing capability: $capability"
-        try {
-            Add-WindowsCapability -Online -Name $capability -Source $LipContent -LimitAccess -ErrorAction Stop
-        } catch {
-            Write-Log "Failed to install capability $capability $_" "WARNING"
-        }
+    # Install Basic FOD
+    Write-Log "Installing Basic FOD CAB: $($basicCab.FullName)"
+    $dismLog2 = Join-Path $TempPath "DISM_BasicFOD.log"
+    $proc2 = Start-Process -FilePath "dism.exe" -ArgumentList "/Online /Add-Package /PackagePath:`"$($basicCab.FullName)`" /NoRestart /Quiet /LogPath:`"$dismLog2`"" -Wait -PassThru
+    if ($proc2.ExitCode -ne 0) {
+        Write-Log "DISM failed for $($basicCab.Name), exit code $($proc2.ExitCode). See $dismLog2" "ERROR"
+        throw
     }
 
-    # Register and set as default everywhere (system/user/welcome/new user)
+    # Install OCR FOD
+    Write-Log "Installing OCR FOD CAB: $($ocrCab.FullName)"
+    $dismLog3 = Join-Path $TempPath "DISM_OCRFOD.log"
+    $proc3 = Start-Process -FilePath "dism.exe" -ArgumentList "/Online /Add-Package /PackagePath:`"$($ocrCab.FullName)`" /NoRestart /Quiet /LogPath:`"$dismLog3`"" -Wait -PassThru
+    if ($proc3.ExitCode -ne 0) {
+        Write-Log "DISM failed for $($ocrCab.Name), exit code $($proc3.ExitCode). See $dismLog3" "ERROR"
+        throw
+    }
+
+    # Set Dutch as default everywhere
     Write-Log "Registering $LanguageTag as system, user, and welcome UI language"
     Set-WinUserLanguageList $LanguageTag -Force
     Set-WinUILanguageOverride -Language $LanguageTag
     Set-WinSystemLocale -SystemLocale $LanguageTag
-    Set-WinHomeLocation -GeoId 34 
+    Set-WinHomeLocation -GeoId 34
     Set-Culture $LanguageTag
     Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true
 
-    # Remove LXP AppX package if present (prevents conflicts)
-    $lxpAppx = Get-AppxPackage -AllUsers | Where-Object { $_.Name -like "Microsoft.LanguageExperiencePacknl-NL*" }
-    if ($lxpAppx) {
-        Write-Log "Removing LXP AppX package: $($lxpAppx.PackageFullName)"
-        Remove-AppxPackage -Package $lxpAppx.PackageFullName -AllUsers
-    }
-
     Write-Log "Language pack $LanguageTag installed and set as default. Windows requires a reboot for display language to take effect." "SUCCESS"
 
-    # Sysprep readiness: clean up pending operations
+    # Sysprep readiness
     Write-Log "Cleaning up pending language pack operations for Sysprep readiness"
     dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase
 }
@@ -101,6 +89,5 @@ catch {
     exit 1
 }
 finally {
-    # Clean up temp files
     if (Test-Path $TempPath) { Remove-Item -Path $TempPath -Recurse -Force }
 }

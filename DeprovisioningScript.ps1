@@ -53,23 +53,6 @@ try {
 
     #region System Cleanup
     Write-Output "[$(Get-Date)] Cleaning residual configuration files..."
-    
-    $unattendPaths = @(
-        "$Env:SystemRoot\system32\Sysprep\unattend.xml",
-        "$Env:SystemRoot\Panther\unattend.xml"
-    )
-
-    foreach ($path in $unattendPaths) {
-        if (Test-Path $path) {
-            try {
-                Remove-Item $path -Force -ErrorAction Stop
-                Write-Output "Removed: $path"
-            }
-            catch {
-                Write-Warning "Failed to remove $path - $_"
-            }
-        }
-    }
     #endregion
 
     #region Sysprep Execution

@@ -29,7 +29,7 @@ try {
     Write-Log "Extracting ZIP to $TempPath..."
     Expand-Archive -Path $zipFile -DestinationPath $TempPath -Force
 
-    # Find the main language pack CAB
+    # Install main language pack CAB
     $langCab = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-Client-Language-Pack_x64_$LanguageTag*.cab" -Recurse | Select-Object -First 1
     if (-not $langCab) { throw "Main language pack CAB not found for $LanguageTag in $TempPath or subfolders" }
     Write-Log "Installing main CAB: $($langCab.FullName)"
@@ -52,10 +52,7 @@ try {
 
     # Register and set as default everywhere (system/user/welcome/new user)
     Write-Log "Registering $LanguageTag as system, user, and welcome UI language"
-    # Install-Language is preferred, but fallback to manual registration if not present
-    if (Get-Command Install-Language -ErrorAction SilentlyContinue) {
-        Install-Language -Language $LanguageTag -CopyToSettings
-    }
+    # DO NOT use Install-Language
 
     Set-WinUserLanguageList $LanguageTag -Force
     Set-WinUILanguageOverride -Language $LanguageTag

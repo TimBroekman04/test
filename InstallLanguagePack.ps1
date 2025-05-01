@@ -56,9 +56,6 @@ try {
     # Find CABs
     $langPackCab = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-Client-Language-Pack_x64_${LanguageTag}.cab" -Recurse | Select-Object -First 1
     $basicCab    = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-LanguageFeatures-Basic-${LanguageTag}-Package~*.cab" -Recurse | Select-Object -First 1
-    $ocrCab      = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-LanguageFeatures-OCR-${LanguageTag}-Package~*.cab" -Recurse | Select-Object -First 1
-    $handwritingCab = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-LanguageFeatures-Handwriting-${LanguageTag}-Package~*.cab" -Recurse | Select-Object -First 1
-    $textToSpeechCab = Get-ChildItem -Path $TempPath -Filter "Microsoft-Windows-LanguageFeatures-TextToSpeech-${LanguageTag}-Package~*.cab" -Recurse | Select-Object -First 1
 
     if (-not $langPackCab) { Write-Log "Main language pack CAB not found!" "ERROR"; throw }
     if (-not $basicCab)    { Write-Log "Basic FOD CAB not found!" "ERROR"; throw }

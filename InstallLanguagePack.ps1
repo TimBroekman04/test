@@ -50,26 +50,25 @@ try {
         if ($fodRes.ExitCode -ne 0) { Write-Log "DISM failed for FOD CAB $($fod.FullName). See $fodLog" "WARNING" }
     }
 
-    # Use Install-Language for proper registration and settings copy (requires Windows 11/Server 2022+)
-    Write-Log "Installing and setting $LanguageTag as system default using Install-Language"
-    Install-Language -Language $LanguageTag -CopyToSettings 
+    # Register and set as default everywhere (system/user/welcome/new user)
+    Write-Log "Registering $LanguageTag as system, user, and welcome UI language"
+    # Install-Language is preferred, but fallback to manual registration if not present
+    if (Get-Command Install-Language -ErrorAction SilentlyContinue) {
+        Install-Language -Language $LanguageTag -CopyToSettings -Force
+    }
 
-    # Set as default for user, system, and welcome screen
-    Write-Log "Setting $LanguageTag as Windows display language for all contexts"
-    Set-WinUILanguageOverride -Language $LanguageTag
     Set-WinUserLanguageList $LanguageTag -Force
+    Set-WinUILanguageOverride -Language $LanguageTag
     Set-WinSystemLocale -SystemLocale $LanguageTag
     Set-WinHomeLocation -GeoId 34   # 34 = Netherlands
     Set-Culture $LanguageTag
-    Set-WinUILanguageOverride -Language $LanguageTag
     Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true
+
+    Write-Log "Language pack $LanguageTag installed and set as default. Windows requires a reboot for display language to take effect." "SUCCESS"
 
     # Sysprep readiness: clean up pending operations
     Write-Log "Cleaning up pending language pack operations for Sysprep readiness"
     dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase
-
-    # Final log
-    Write-Log "Language pack $LanguageTag installed and set as default. System is Sysprep ready. Please reboot to apply display language." "SUCCESS"
 }
 catch {
     Write-Log "Error: $_" "ERROR"

@@ -1,57 +1,38 @@
 param(
     [Parameter(Mandatory)]
-    [string]$ISOPath,
-    
-    [Parameter(Mandatory)]
-    [string]$LanguageTag,
-    
-    [string]$TempPath = "C:\LangInstall"
+    [string]$IsoSasUrl
 )
 
-$ErrorActionPreference = 'Stop'
-$logFile = "$TempPath\DISM_Offline.log"
+$isoPath = "$env:TEMP\$(Split-Path $IsoSasUrl -Leaf)"
 
 try {
-    # Mount ISO
-    Write-Host "Mounting ISO: $ISOPath"
-    $mountResult = Mount-DiskImage -ImagePath $ISOPath -PassThru
-    $driveLetter = ($mountResult | Get-Volume).DriveLetter + ':'
+    # Download ISO using SAS token
+    Invoke-WebRequest -Uri $IsoSasUrl -OutFile $isoPath -UseBasicParsing
 
-    # Install Language Pack
-    $langPackPath = "$driveLetter\x64\langpacks\Microsoft-Windows-Client-Language-Pack_x64_$LanguageTag.cab"
-    Write-Host "Installing language pack from: $langPackPath"
-    dism /Online /Add-Package /PackagePath:"$langPackPath" /LogPath:"$logFile"
+    # Mount ISO and install language
+    $mountResult = Mount-DiskImage -ImagePath $isoPath -PassThru
+    $driveLetter = ($mountResult | Get-Volume).DriveLetter + ":"
 
-    # Install Language Features
-    $capabilities = @(
-        "Language.Basic~~~$LanguageTag~0.0.1.0",
-        "Language.Handwriting~~~$LanguageTag~0.0.1.0",
-        "Language.OCR~~~$LanguageTag~0.0.1.0"
-    )
-
-    foreach ($cap in $capabilities) {
-        Write-Host "Installing capability: $cap"
-        dism /Online /Add-Capability /CapabilityName:$cap /Source:"$driveLetter\x64\FOD" /LogPath:"$logFile"
-    }
-
-    # Configure regional settings
-    Set-WinSystemLocale -SystemLocale $LanguageTag
-    Set-WinUILanguageOverride -Language $LanguageTag
-    Set-TimeZone -Id "W. Europe Standard Time"
-
-    # Persist settings for new users
-    Copy-UserInternationalSettingsToSystem -WelcomeScreen $true -NewUser $true
-
-    # Cleanup
-    dism /Online /Cleanup-Image /StartComponentCleanup /ResetBase /LogPath:"$logFile"
-}
-catch {
-    Write-Host "Error occurred: $_"
-    exit 1
+    # DISM commands
+    dism /online /add-package /packagepath:"$driveLetter\LanguagesAndOptionalFeatures\Microsoft-Windows-Client-Language-Pack_x64_nl-nl.cab"
+    
+    # Regional settings
+    Set-WinSystemLocale -SystemLocale nl-NL
+    Set-WinHomeLocation -GeoId 176
+    Set-WinUILanguageOverride -Language nl-NL
+    
+    # Language features
+    dism /online /add-capability /name:Language.Handwriting~~~nl-NL~0.0.1.0
+    dism /online /add-capability /name:Language.OCR~~~nl-NL~0.0.1.0
 }
 finally {
-    # Dismount ISO
-    if ($mountResult) {
-        Dismount-DiskImage -ImagePath $ISOPath
+    if (Test-Path $isoPath) {
+        Dismount-DiskImage -ImagePath $isoPath
+        Remove-Item $isoPath -Force
+    }
+    
+    # Verification
+    if ((Get-WinUserLanguageList).LanguageTag -notcontains "nl-NL") {
+        throw "Language installation verification failed"
     }
 }

@@ -12,25 +12,15 @@ $ErrorActionPreference = 'Stop'
 $logFile = "$TempPath\DISM_Offline.log"
 
 try {
-    # Create temp directory
-    if (-not (Test-Path $TempPath)) {
-        New-Item -Path $TempPath -ItemType Directory -Force | Out-Null
-    }
-
     # Mount ISO
     Write-Host "Mounting ISO: $ISOPath"
-    Mount-DiskImage -ImagePath $ISOPath
-    $driveLetter = (Get-DiskImage -ImagePath $ISOPath | Get-Volume).DriveLetter + ':'
-
-    # Validate ISO structure
-    if (-not (Test-Path "$driveLetter\x64\langpacks")) {
-        throw "Invalid ISO structure - missing langpacks directory"
-    }
+    $mountResult = Mount-DiskImage -ImagePath $ISOPath -PassThru
+    $driveLetter = ($mountResult | Get-Volume).DriveLetter + ':'
 
     # Install Language Pack
     $langPackPath = "$driveLetter\x64\langpacks\Microsoft-Windows-Client-Language-Pack_x64_$LanguageTag.cab"
     Write-Host "Installing language pack from: $langPackPath"
-    dism /Online /Add-Package /PackagePath:"$langPackPath" /LogPath:"$logFile" /English
+    dism /Online /Add-Package /PackagePath:"$langPackPath" /LogPath:"$logFile"
 
     # Install Language Features
     $capabilities = @(
@@ -41,7 +31,7 @@ try {
 
     foreach ($cap in $capabilities) {
         Write-Host "Installing capability: $cap"
-        dism /Online /Add-Capability /CapabilityName:$cap /Source:"$driveLetter\x64\FOD" /LogPath:"$logFile" /English
+        dism /Online /Add-Capability /CapabilityName:$cap /Source:"$driveLetter\x64\FOD" /LogPath:"$logFile"
     }
 
     # Configure regional settings
@@ -61,7 +51,7 @@ catch {
 }
 finally {
     # Dismount ISO
-    if ($driveLetter) {
+    if ($mountResult) {
         Dismount-DiskImage -ImagePath $ISOPath
     }
 }

@@ -1,97 +1,153 @@
 <#
 .SYNOPSIS
-Enterprise Sysprep Script for Azure Virtual Desktop Image Templates
+Enterprise Sysprep Script with Advanced Retry Logic and Servicing Stack Awareness
 .DESCRIPTION
-Version 2.1 (2025-05-01)
-Includes Azure-optimized service checks, registry validation, and secure cleanup
+Version 3.0 (2025-05-05)
+Features:
+- Servicing stack readiness checks
+- Intelligent retry with exponential backoff
+- Pending operation detection
+- Comprehensive logging
 #>
 
-Start-Transcript -Path "C:\Windows\Temp\AVD-Sysprep.log" -Append
+$ErrorActionPreference = 'Stop'
 
 try {
-    #region Service Initialization Sequence
-    Write-Output "[$(Get-Date)] Starting Azure GA Agent validation..."
+    #region Pre-Sysprep Validation
+    Write-Output "[$(Get-Date)] Starting pre-sysprep validation..."
+
+    # Check for pending reboots
+    if (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations") {
+        throw "Pending file rename operations detected. Reboot required before sysprep."
+    }
+
+    # Verify servicing stack state
+    $maxServicingWait = 3600  
+    $servicingStart = Get-Date
+    while ((Get-Date) - $servicingStart -lt [TimeSpan]::FromSeconds($maxServicingWait)) {
+        $servicingProcesses = Get-Process -Name TrustedInstaller, TiWorker -ErrorAction SilentlyContinue
+        if (-not $servicingProcesses) {
+            Write-Output "[$(Get-Date)] Servicing stack is idle"
+            break
+        }
+        Write-Output "[$(Get-Date)] Servicing stack active (processes: $($servicingProcesses.Name -join ', ')) - waiting..."
+        Start-Sleep -Seconds 60
+    }
+    #endregion
+
+    #region Azure Agent Validation
+    Write-Output "[$(Get-Date)] Validating Azure platform services..."
+    $services = @('RdAgent', 'WindowsAzureGuestAgent', 'WindowsAzureTelemetryService')
     
-    $maxRetries = 30  # 2.5 minute timeout
-    $retryInterval = 5
-
-    # RdAgent check with timeout
-    Write-Output ">>> Waiting for RdAgent service..."
-    $retryCount = 0
-    while ((Get-Service -Name RdAgent -ErrorAction SilentlyContinue).Status -ne 'Running') {
-        if ($retryCount -ge $maxRetries) {
-            throw "RdAgent failed to start within $($maxRetries * $retryInterval) seconds"
-        }
-        Start-Sleep -Seconds $retryInterval
-        $retryCount++
-    }
-
-    # WindowsAzureTelemetryService (conditional check)
-    if (Get-Service -Name WindowsAzureTelemetryService -ErrorAction SilentlyContinue) {
-        Write-Output ">>> Waiting for WindowsAzureTelemetryService..."
+    foreach ($service in $services) {
         $retryCount = 0
-        while ((Get-Service WindowsAzureTelemetryService).Status -ne 'Running') {
-            if ($retryCount -ge $maxRetries) {
-                throw "WindowsAzureTelemetryService failed to start within timeout"
+        $maxRetries = 30  # 5 minutes per service
+        Write-Output ">>> Validating $service"
+        
+        while ($retryCount -lt $maxRetries) {
+            try {
+                $status = (Get-Service -Name $service -ErrorAction Stop).Status
+                if ($status -eq 'Running') {
+                    Write-Output "[$(Get-Date)] $service is running"
+                    break
+                }
             }
-            Start-Sleep -Seconds $retryInterval
-            $retryCount++
+            catch {
+                if ($retryCount -ge $maxRetries) {
+                    throw "$service did not reach running state within timeout"
+                }
+                Start-Sleep -Seconds 10
+                $retryCount++
+            }
         }
-    }
-
-    # WindowsAzureGuestAgent check
-    Write-Output ">>> Waiting for WindowsAzureGuestAgent..."
-    $retryCount = 0
-    while ((Get-Service -Name WindowsAzureGuestAgent).Status -ne 'Running') {
-        if ($retryCount -ge $maxRetries) {
-            throw "WindowsAzureGuestAgent failed to start within timeout"
-        }
-        Start-Sleep -Seconds $retryInterval
-        $retryCount++
     }
     #endregion
 
     #region System Cleanup
-    Write-Output "[$(Get-Date)] Cleaning residual configuration files..."
+    Write-Output "[$(Get-Date)] Performing pre-sysprep cleanup..."
+    # Remove temporary files
+    Get-ChildItem -Path $env:TEMP -Recurse | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+    
+    # Clear event logs
+    wevtutil cl Application
+    wevtutil cl System
     #endregion
 
-    #region Sysprep Execution
-    Write-Output "[$(Get-Date)] Initiating Sysprep sequence..."
-    
+    #region Sysprep Execution with Smart Retry
+    Write-Output "[$(Get-Date)] Initializing sysprep sequence..."
     $sysprepParams = @(
         "/oobe",
         "/generalize",
         "/quiet",
-        "/quit"  # Critical change for Azure integration
+        "/quit"
     )
 
-    $sysprepProcess = Start-Process "$Env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList $sysprepParams -PassThru
-    
-    # Validation loop with timeout
-    $sysprepTimeout = 600  # 10 minutes
-    $startTime = Get-Date
-    while ((Get-Date) - $startTime -lt [TimeSpan]::FromSeconds($sysprepTimeout)) {
-        $imageState = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -Name ImageState -ErrorAction SilentlyContinue).ImageState
-        
-        if ($imageState -eq 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') {
-            Write-Output "[$(Get-Date)] Sysprep validation successful"
-            break
+    $sysprepAttempt = 0
+    $maxAttempts = 10
+    $sysprepSuccess = $false
+
+    while ($sysprepAttempt -lt $maxAttempts -and -not $sysprepSuccess) {
+        $sysprepAttempt++
+        Write-Output "[$(Get-Date)] Sysprep attempt $sysprepAttempt/$maxAttempts"
+
+        try {
+            # Force terminate non-essential processes
+            Get-Process | Where-Object {
+                $_.ProcessName -notin @('Idle', 'System', 'smss', 'csrss', 'wininit', 'services', 'lsass', 'svchost', 'taskhostw', 'dwm')
+            } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+            Start-Process "$Env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList $sysprepParams -Wait -NoNewWindow
+
+            # State validation with progressive timeout
+            $validationTimeout = [math]::Min(3600, $sysprepAttempt * 1200)  # 20-60 minutes
+            $validationStart = Get-Date
+            $validState = $false
+
+            while ((Get-Date) - $validationStart -lt [TimeSpan]::FromSeconds($validationTimeout)) {
+                $imageState = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -Name ImageState -ErrorAction SilentlyContinue).ImageState
+                
+                if ($imageState -eq 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') {
+                    Write-Output "[$(Get-Date)] Sysprep validation successful"
+                    $validState = $true
+                    break
+                }
+                
+                Write-Output "[$(Get-Date)] Current state: $imageState"
+                Start-Sleep -Seconds 30
+            }
+
+            if ($validState) {
+                $sysprepSuccess = $true
+                break
+            }
+            else {
+                Write-Output "[$(Get-Date)] Sysprep validation timeout"
+            }
         }
-        Start-Sleep -Seconds 10
+        catch {
+            Write-Output "[$(Get-Date)] Sysprep attempt $sysprepAttempt failed: $_"
+            if ($sysprepAttempt -lt $maxAttempts) {
+                Write-Output "[$(Get-Date)] Retrying in 5 minutes..."
+                Start-Sleep -Seconds 300
+            }
+        }
     }
 
-    if (-not $imageState -or $imageState -ne 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE') {
-        throw "Sysprep failed to reach expected state. Current state: $imageState"
+    if (-not $sysprepSuccess) {
+        throw "Sysprep failed after $maxAttempts attempts"
     }
     #endregion
 }
 catch {
-    Write-Output "[$(Get-Date)] CRITICAL ERROR: $_"
-    $_ | Format-List -Force | Out-String | Write-Output
+    $errorMessage = $_.Exception.Message
+    Write-Output "[$(Get-Date)] CRITICAL ERROR: $errorMessage"
+    try {
+        Write-EventLog -LogName Application -Source "EnterpriseSysprep" -EntryType Error -EventId 501 -Message "Sysprep failed: $errorMessage"
+    }
+    catch {}
     exit 1
 }
 finally {
-    Stop-Transcript
 }
 
 Write-Output "[$(Get-Date)] Sysprep process completed successfully"

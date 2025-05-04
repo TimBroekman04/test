@@ -17,27 +17,6 @@ param(
 
 function Write-Log { param($msg, $lvl = "INFO") ; Write-Host "[$((Get-Date).ToString('s'))][$lvl] $msg" }
 
-# Helper: Wait for servicing tasks to be ready
-function Wait-ForServicingReady {
-    $tasks = @(
-        "\Microsoft\Windows\LanguageComponentsInstaller\Installation",
-        "\Microsoft\Windows\LanguageComponentsInstaller\ReconcileLanguageResources"
-    )
-    foreach ($task in $tasks) {
-        $taskObj = Get-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
-        $attempts = 0
-        while ($taskObj.State -ne "Ready" -and $attempts -lt 10) {
-            Write-Log "$task not ready, waiting..."
-            Start-Sleep -Seconds 5
-            $taskObj = Get-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
-            $attempts++
-        }
-        if ($taskObj.State -ne "Ready") {
-            Write-Log "$task did not reach Ready state after waiting." "ERROR"
-        }
-    }
-}
-
 # Helper: Wait for Windows servicing processes to finish
 function Wait-ForServicingProcesses {
     $servicingProcesses = "TiWorker","TrustedInstaller","MoUsoCoreWorker"
@@ -77,8 +56,6 @@ foreach ($task in $tasks) {
         Start-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue
     }
 }
-
-Wait-ForServicingReady
 
 # Step 3: Check for pending reboot
 if (Test-PendingReboot) {

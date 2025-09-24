@@ -5,52 +5,62 @@ param(
 
 Write-Host "Starting AVD Agent installation script."
 
-$uris = @(
-    "https://go.microsoft.com/fwlink/?linkid=2310011", # Agent
-    "https://go.microsoft.com/fwlink/?linkid=2311028"  # Bootloader
-)
+# Agent and Bootloader download links
+$uris = @{
+    Agent      = "https://go.microsoft.com/fwlink/?linkid=2310011"
+    Bootloader = "https://go.microsoft.com/fwlink/?linkid=2311028"
+}
 
 $tempPath = $env:TEMP
-$installers = @()
+$installers = @{}
 
-foreach ($uri in $uris) {
+# Create a WebClient object for downloading
+$webClient = New-Object System.Net.WebClient
+
+foreach ($item in $uris.GetEnumerator()) {
+    $name = $item.Name
+    $uri = $item.Value
+    
     try {
-        $response = Invoke-WebRequest -Uri $uri -MaximumRedirection 0 -ErrorAction SilentlyContinue
-        $expandedUri = $response.Headers.Location
-        if (-not $expandedUri) {
-            # Handle cases where redirection is not in the header
-            $expandedUri = $response.BaseResponse.ResponseUri.AbsoluteUri
-        }
+        Write-Host "Downloading AVD $($name)..."
         
+        # Discover the actual download URL by following the redirect
+        $request = [System.Net.HttpWebRequest]::Create($uri)
+        $request.AllowAutoRedirect = $false
+        $response = $request.GetResponse()
+        $expandedUri = $response.Headers["Location"]
+        $response.Close()
+
+        if (-not $expandedUri) {
+            throw "Failed to resolve redirect for $uri"
+        }
+
         $fileName = [System.IO.Path]::GetFileName($expandedUri.Split('?')[0])
         $outFilePath = Join-Path $tempPath $fileName
         
-        Write-Host "Downloading $fileName from $expandedUri"
-        Invoke-WebRequest -Uri $expandedUri -UseBasicParsing -OutFile $outFilePath
+        Write-Host "Downloading from $expandedUri to $outFilePath"
+        $webClient.DownloadFile($expandedUri, $outFilePath)
         
         Unblock-File -Path $outFilePath
-        $installers += $outFilePath
+        $installers[$name] = $outFilePath
     }
     catch {
-        Write-Error "Failed to download from URI: $uri. Error: $_"
+        Write-Error "Failed to download $($name) from URI: $uri. Error: $_"
         exit 1
     }
 }
 
-Write-Host "`nFiles downloaded:`n$($installers -join "`n")"
+Write-Host "`nFiles downloaded:"
+$installers.GetEnumerator() | ForEach-Object { Write-Host "- $($_.Value)" }
 
-$agentInstaller = $installers | Where-Object { $_ -like "*RDAgent.msi" }
-$bootloaderInstaller = $installers | Where-Object { $_ -like "*RDAgentBootLoader.msi" }
+# --- CORRECTED INSTALLATION ORDER ---
 
-if (-not $agentInstaller -or -not $bootloaderInstaller) {
-    Write-Error "Failed to identify agent and bootloader installers."
-    exit 1
-}
-
-Write-Host "Installing AVD Agent..."
-Start-Process msiexec.exe -Wait -ArgumentList "/i `"$agentInstaller`" /qn REGISTRATIONTOKEN=`"$RegistrationToken`""
-
+# 1. Install the Bootloader first
 Write-Host "Installing AVD Bootloader..."
-Start-Process msiexec.exe -Wait -ArgumentList "/i `"$bootloaderInstaller`" /qn"
+Start-Process msiexec.exe -Wait -ArgumentList "/i `"$($installers['Bootloader'])`" /qn"
+
+# 2. Install the Agent with the registration token
+Write-Host "Installing AVD Agent..."
+Start-Process msiexec.exe -Wait -ArgumentList "/i `"$($installers['Agent'])`" /qn REGISTRATIONTOKEN=`"$RegistrationToken`""
 
 Write-Host "AVD Agent installation complete."
